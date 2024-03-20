@@ -1,7 +1,10 @@
+import 'dart:io';
+
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:obj_cam/display_image.dart';
+import 'package:obj_cam/helper/image_classification.dart';
 
 class ObjCamPage extends StatefulWidget {
   const ObjCamPage({super.key, required this.title, required this.camera});
@@ -24,36 +27,51 @@ class ObjCamPage extends StatefulWidget {
 
 class _ObjCamPageState extends State<ObjCamPage> with WidgetsBindingObserver {
   int _timeCounter = 0;
+  int _frameCounter = 0;
 
   late CameraController _controller;
   late Future<void> _initializeCameraControllerFuture;
+  late ImageClassification imageClassification;
 
   String cameraErrorMessage = "";
+
+  var classification;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initializeSelectedCamera();
+    imageClassification = ImageClassification();
+    imageClassification.init();
   }
 
   Future<void> _initializeSelectedCamera(
       [CameraDescription? description/*= widget.camera */]) async {
     // To display the current output from the Camera, create a CameraController.
     _controller = CameraController(
-      // Use a specific camera - primary camera as default - from the list of
-      // available cameras.
-      widget.camera,
-      // Define the resolution to use here.
-      ResolutionPreset.max,
-    );
+        // Use a specific camera - primary camera as default - from the list of
+        // available cameras.
+        widget.camera,
+        // Define the resolution to use here.
+        ResolutionPreset.low,
+        // Image Format
+        imageFormatGroup: Platform.isIOS
+            ? ImageFormatGroup.bgra8888
+            : ImageFormatGroup.yuv420);
 
     try {
       // Initialize the controller. This returns a Future.
-      _initializeCameraControllerFuture = _controller.initialize();
+      _initializeCameraControllerFuture =
+          _controller.initialize().then((value) {
+        _controller.startImageStream(imageAnalysis);
+        if (mounted) {
+          setState(() {});
+        }
+      });
     } on CameraException catch (e) {
       if (kDebugMode) {
-        print("CameraException: ${e.code}; ${e.description}");
+        print("LOG -- CameraException: ${e.code}; ${e.description}");
       }
       switch (e.code) {
         case 'CameraAccessDenied':
@@ -88,17 +106,18 @@ class _ObjCamPageState extends State<ObjCamPage> with WidgetsBindingObserver {
         setState(() {});
       }
       if (_controller.value.hasError) {
-        print('Camera error ${_controller.value.errorDescription}');
+        print("LOG -- Camera error ${_controller.value.errorDescription}");
       }
     });
   }
 
   @override
   void dispose() {
-    // Dispose of the controller when the widget is disposed.
-    _controller.dispose();
     // Clean up the stateful widget whenever the app is minimized or killed.
     WidgetsBinding.instance.removeObserver(this);
+    // Dispose of the controller when the widget is disposed.
+    _controller.dispose();
+    imageClassification.close();
     super.dispose();
   }
 
@@ -182,7 +201,7 @@ class _ObjCamPageState extends State<ObjCamPage> with WidgetsBindingObserver {
             // saved.
             final image = await _controller.takePicture();
             showInSnackBar('Picture saved to ${image.path}');
-            print('Picture saved to ${image.path}');
+            print("LOG -- Picture saved to ${image.path}");
             // if (!context.mounted) return;
 
             // If the picture was taken, display it on a new screen.
@@ -198,7 +217,7 @@ class _ObjCamPageState extends State<ObjCamPage> with WidgetsBindingObserver {
           } catch (e) {
             // If an error occurs, log the error to the console.
             if (kDebugMode) {
-              print(e);
+              print("LOG -- $e");
             }
           }
         },
@@ -209,20 +228,25 @@ class _ObjCamPageState extends State<ObjCamPage> with WidgetsBindingObserver {
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    final CameraController cameraController = _controller;
+  Future<void> didChangeAppLifecycleState(AppLifecycleState state) async {
+    // final CameraController cameraController = _controller;
 
     // App state changed before we got the chance to initialize.
-    if (!cameraController.value.isInitialized) {
+    if (!_controller.value.isInitialized) {
       return;
     }
 
     if (state == AppLifecycleState.inactive) {
       // Free up memory when camera not active
-      cameraController.dispose();
+      _controller.dispose();
     } else if (state == AppLifecycleState.resumed) {
       // Reinitialize the camera with same properties
-      _initializeSelectedCamera(cameraController.description);
+      _initializeSelectedCamera(_controller.description);
+      if (!_controller.value.isStreamingImages) {
+        // await _controller.startImageStream((imageAnalysis) {});
+      }
+    } else if (state == AppLifecycleState.paused) {
+      // _controller.stopImageStream();
     }
   }
 
@@ -231,5 +255,24 @@ class _ObjCamPageState extends State<ObjCamPage> with WidgetsBindingObserver {
       content: Text(message),
       duration: const Duration(seconds: 7),
     ));
+  }
+
+  Future<void> imageAnalysis(CameraImage cameraImage) async {
+    _frameCounter++;
+    if (_frameCounter % 20 == 0) {
+      _frameCounter = 0;
+
+      // if image is still analyze, skip this frame
+      // if (_isProcessing) {
+      //   return;
+      // }
+      // _isProcessing = true;
+      classification =
+          await imageClassification.inferenceCameraFrame(cameraImage);
+      // _isProcessing = false;
+      if (mounted) {
+        setState(() {});
+      }
+    }
   }
 }
