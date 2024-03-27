@@ -1,10 +1,15 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:obj_cam/display_image.dart';
-import 'package:obj_cam/helper/image_classification.dart';
+import 'package:obj_cam/ui/display_image.dart';
+
+import 'package:obj_cam/models/recognition.dart';
+import 'package:obj_cam/models/screen_params.dart';
+import 'package:obj_cam/service/detector_service.dart';
+import 'package:obj_cam/ui/box_widget.dart';
 
 class ObjCamPage extends StatefulWidget {
   const ObjCamPage({super.key, required this.title, required this.camera});
@@ -26,49 +31,60 @@ class ObjCamPage extends StatefulWidget {
 }
 
 class _ObjCamPageState extends State<ObjCamPage> with WidgetsBindingObserver {
-  int _timeCounter = 0;
   int _frameCounter = 0;
-
-  late CameraController _controller;
-  late Future<void> _initializeCameraControllerFuture;
-  late ImageClassification imageClassification;
 
   String cameraErrorMessage = "";
 
   var classification;
+  StreamSubscription? _subscription;
+
+  CameraController? _cameraController;
+
+  // use only when initialized; rarely null
+  get _controller => _cameraController;
+
+  /// Object Detector is running on a background [Isolate]. This is nullable
+  /// because acquiring a [Detector] is an asynchronous operation. This value is
+  /// `null` until the detector is initialized.
+  Detector? _detector;
+
+  /// Results to draw bounding boxes
+  List<Recognition>? results;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initializeSelectedCamera();
-    imageClassification = ImageClassification();
-    imageClassification.init();
+    _initDetectorAsync();
   }
 
+  /// Initializes the camera by setting [_cameraController]
   Future<void> _initializeSelectedCamera(
       [CameraDescription? description/*= widget.camera */]) async {
-    // To display the current output from the Camera, create a CameraController.
-    _controller = CameraController(
+    try {
+      // To display the current output from the Camera, create a CameraController.
+      _cameraController = CameraController(
         // Use a specific camera - primary camera as default - from the list of
         // available cameras.
         widget.camera,
         // Define the resolution to use here.
-        ResolutionPreset.low,
+        ResolutionPreset.medium,
         // Image Format
         imageFormatGroup: Platform.isIOS
             ? ImageFormatGroup.bgra8888
-            : ImageFormatGroup.yuv420);
-
-    try {
-      // Initialize the controller. This returns a Future.
-      _initializeCameraControllerFuture =
-          _controller.initialize().then((value) {
-        _controller.startImageStream(imageAnalysis);
-        if (mounted) {
+            : ImageFormatGroup.yuv420,
+        enableAudio: false,
+      )..initialize().then((value) async {
+          await _controller.startImageStream(imageAnalysis);
           setState(() {});
-        }
-      });
+
+          /// previewSize is size of each image frame captured by controller
+          ///
+          /// 352x288 on iOS, 240p (320x240) on Android with ResolutionPreset.low
+          /// ~480p on Android with Resolution.medium
+          ScreenParams.previewSize = _controller.value.previewSize!;
+        });
     } on CameraException catch (e) {
       if (kDebugMode) {
         print("LOG -- CameraException: ${e.code}; ${e.description}");
@@ -95,19 +111,21 @@ class _ObjCamPageState extends State<ObjCamPage> with WidgetsBindingObserver {
           cameraErrorMessage = "Camera not yet initialized.";
           break;
       }
-      if (mounted) {
-        setState(() {});
-      }
     }
+  }
 
-    // If the controller is updated then update the UI.
-    _controller.addListener(() {
-      if (mounted) {
-        setState(() {});
-      }
-      if (_controller.value.hasError) {
-        print("LOG -- Camera error ${_controller.value.errorDescription}");
-      }
+  void _initDetectorAsync() async {
+    // Spawn a new isolate
+    Detector.start().then((instance) {
+      setState(() {
+        _detector = instance;
+        _subscription = instance.resultsStream.stream.listen((values) {
+          setState(() {
+            results = values['recognitions'];
+            // stats = values['stats'];
+          });
+        });
+      });
     });
   }
 
@@ -116,13 +134,47 @@ class _ObjCamPageState extends State<ObjCamPage> with WidgetsBindingObserver {
     // Clean up the stateful widget whenever the app is minimized or killed.
     WidgetsBinding.instance.removeObserver(this);
     // Dispose of the controller when the widget is disposed.
-    _controller.dispose();
-    imageClassification.close();
+    _cameraController?.dispose();
+    _detector?.stop();
+    _subscription?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // Display a message and a loading indicator if the camera is not initialized.
+    if (_cameraController == null || !_controller.value.isInitialized) {
+      // TODO: check if audio permission is also enabled.
+      return Column(
+        // Column is also a layout widget. It takes a list of children and
+        // arranges them vertically. By default, it sizes itself to fit its
+        // children horizontally, and tries to be as tall as its parent.
+        //
+        // Column has various properties to control how it sizes itself and
+        // how it positions its children. Here we use mainAxisAlignment to
+        // center the children vertically; the main axis here is the vertical
+        // axis because Columns are vertical (the cross axis would be
+        // horizontal).
+        //
+        // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
+        // action in the IDE, or press "p" in the console), to see the
+        // wireframe for each widget.
+        // mainAxisAlignment: MainAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Text(
+            cameraErrorMessage,
+            style: Theme.of(context).textTheme.headlineMedium,
+          ),
+          const CircularProgressIndicator(),
+        ],
+      );
+    }
+
+    ScreenParams.screenSize = MediaQuery.sizeOf(context);
+    var aspect = 1 / _controller.value.aspectRatio;
+
     // The Flutter framework has been optimized to make rerunning build methods
     // fast, so that you can just rebuild anything that needs updating rather
     // than having to individually change instances of widgets.
@@ -134,59 +186,23 @@ class _ObjCamPageState extends State<ObjCamPage> with WidgetsBindingObserver {
         title: Text(widget.title),
       ),
       // You must wait until the controller is initialized before displaying the
-      // camera preview. Use a FutureBuilder to display a loading spinner until the
-      // controller has finished initializing.
-      body: FutureBuilder<void>(
-        future: _initializeCameraControllerFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.done &&
-              _controller != null &&
-              _controller.value.isInitialized) {
-            // TODO: check if audio permission is also enabled.
-            // If the Future is complete, display the preview.
-            return Center(
-              // Center is a layout widget. It takes a single child and positions it
-              // in the middle of the parent.
-              child: Column(
-                // Column is also a layout widget. It takes a list of children and
-                // arranges them vertically. By default, it sizes itself to fit its
-                // children horizontally, and tries to be as tall as its parent.
-                //
-                // Column has various properties to control how it sizes itself and
-                // how it positions its children. Here we use mainAxisAlignment to
-                // center the children vertically; the main axis here is the vertical
-                // axis because Columns are vertical (the cross axis would be
-                // horizontal).
-                //
-                // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-                // action in the IDE, or press "p" in the console), to see the
-                // wireframe for each widget.
-                mainAxisAlignment: MainAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    'Live Camera Preview',
-                    style: Theme.of(context).textTheme.headlineMedium,
-                  ),
-                  CameraPreview(_controller),
-                ],
-              ),
-            );
-          } else {
-            // Otherwise, display a message and a loading indicator. Display a
-            // message if the camera is not initialized.
-            // if (!_controller.value.isInitialized)
-            return Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  cameraErrorMessage,
-                  style: Theme.of(context).textTheme.headlineMedium,
-                ),
-                const CircularProgressIndicator(),
-              ],
-            );
-          }
-        },
+      // camera preview. Display a loading spinner until the controller has
+      // finished initializing.
+      body: Stack(
+        children: [
+          Text(
+            'Live Camera Preview',
+            style: Theme.of(context).textTheme.headlineMedium,
+          ),
+          AspectRatio(
+            aspectRatio: aspect,
+            child: CameraPreview(_controller),
+          ),
+          AspectRatio(
+            aspectRatio: aspect,
+            child: _boundingBoxes(),
+          ),
+        ],
       ),
       floatingActionButton: FloatingActionButton(
         // An onPressed callback to capture the image in frame.
@@ -195,13 +211,15 @@ class _ObjCamPageState extends State<ObjCamPage> with WidgetsBindingObserver {
           // catch the error.
           try {
             // Ensure that the camera is initialized.
-            await _initializeCameraControllerFuture;
+            await _cameraController;
 
             // Attempt to take a picture and get the file `image` where it was
             // saved.
             final image = await _controller.takePicture();
             showInSnackBar('Picture saved to ${image.path}');
-            print("LOG -- Picture saved to ${image.path}");
+            if (kDebugMode) {
+              print("LOG -- Picture saved to ${image.path}");
+            }
             // if (!context.mounted) return;
 
             // If the picture was taken, display it on a new screen.
@@ -227,26 +245,33 @@ class _ObjCamPageState extends State<ObjCamPage> with WidgetsBindingObserver {
     );
   }
 
+  /// Returns [Stack] of bounding boxes
+  Widget _boundingBoxes() {
+    if (results == null) {
+      return const SizedBox.shrink();
+    }
+    return Stack(
+        children: results!.map((box) => BoxWidget(result: box)).toList());
+  }
+
   @override
   Future<void> didChangeAppLifecycleState(AppLifecycleState state) async {
-    // final CameraController cameraController = _controller;
-
     // App state changed before we got the chance to initialize.
-    if (!_controller.value.isInitialized) {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
       return;
     }
 
     if (state == AppLifecycleState.inactive) {
       // Free up memory when camera not active
-      _controller.dispose();
+      _cameraController?.stopImageStream();
+      _detector?.stop();
+      _subscription?.cancel();
     } else if (state == AppLifecycleState.resumed) {
       // Reinitialize the camera with same properties
-      _initializeSelectedCamera(_controller.description);
-      if (!_controller.value.isStreamingImages) {
-        // await _controller.startImageStream((imageAnalysis) {});
-      }
+      _initializeSelectedCamera(widget.camera);
+      _initDetectorAsync();
     } else if (state == AppLifecycleState.paused) {
-      // _controller.stopImageStream();
+      _cameraController?.stopImageStream();
     }
   }
 
@@ -257,19 +282,12 @@ class _ObjCamPageState extends State<ObjCamPage> with WidgetsBindingObserver {
     ));
   }
 
+  /// Callback to receive each frame [CameraImage] perform inference on it
   Future<void> imageAnalysis(CameraImage cameraImage) async {
     _frameCounter++;
     if (_frameCounter % 20 == 0) {
       _frameCounter = 0;
-
-      // if image is still analyze, skip this frame
-      // if (_isProcessing) {
-      //   return;
-      // }
-      // _isProcessing = true;
-      classification =
-          await imageClassification.inferenceCameraFrame(cameraImage);
-      // _isProcessing = false;
+      _detector?.processFrame(cameraImage);
       if (mounted) {
         setState(() {});
       }
