@@ -254,11 +254,6 @@ class _DetectorServer {
 
   Map<String, dynamic> analyseImage(
       image_lib.Image? image, int preConversionTime) {
-    var conversionElapsedTime =
-        DateTime.now().millisecondsSinceEpoch - preConversionTime;
-
-    var preProcessStart = DateTime.now().millisecondsSinceEpoch;
-
     /// Pre-process the image
     /// Resizing image for model [300, 300]
     final imageInput = image_lib.copyResize(
@@ -278,9 +273,6 @@ class _DetectorServer {
         },
       ),
     );
-
-    var preProcessElapsedTime =
-        DateTime.now().millisecondsSinceEpoch - preProcessStart;
 
     var inferenceTimeStart = DateTime.now().millisecondsSinceEpoch;
 
@@ -334,8 +326,6 @@ class _DetectorServer {
     return {
       "recognitions": recognitions,
       "stats": <String, String>{
-        'Conversion time:': conversionElapsedTime.toString(),
-        'Pre-processing time:': preProcessElapsedTime.toString(),
         'Inference time:': inferenceElapsedTime.toString(),
         'Total prediction time:': totalElapsedTime.toString(),
         'Frame': '${image.width} X ${image.height}',
