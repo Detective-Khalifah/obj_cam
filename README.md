@@ -22,8 +22,14 @@ All expensive and heavy operations are performed in a separate background isolat
 * Portrait mode camera support.
 * Background isolate for smooth performance.
 
-### Prerequisites
+**Demo:**
 
+
+https://github.com/Detective-Khalifah/obj_cam/assets/58272349/a3f3b87d-e171-4dae-861c-749de0d82ada
+
+
+
+### Prerequisites
 - Flutter SDK: Install from [here](https://flutter.dev/docs/get-started/install).
 - Android Studio / Visual Studio Code: For Flutter development.
 - Git: For version control.
